@@ -1,0 +1,18 @@
+# 核心深度學習框架 (Core Deep Learning)
+# 注意：建議至 https://pytorch.org/ 根據你的 CUDA 版本安裝對應的 torch
+torch>=2.0.0
+torchvision>=0.15.0
+
+# 影像處理與矩陣運算 (Image Processing & Numpy)
+numpy>=1.21.0
+opencv-python>=4.5.0
+
+# 訓練進度條與工具 (Utilities)
+tqdm>=4.60.0
+psutil>=5.9.0
+
+# 機器學習工具 - 用於 K-Fold Cross Validation (ML Utils)
+scikit-learn>=1.0.0
+
+# 圖形化介面 (GUI)
+PyQt6>=6.4.0
