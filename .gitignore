@@ -1,0 +1,4 @@
+checkpoints/ 
+carpalTunnel/ 
+*.pth 
+__pycache__/ 

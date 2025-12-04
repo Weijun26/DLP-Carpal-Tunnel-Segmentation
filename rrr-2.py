@@ -1,0 +1,164 @@
+#新版：SGD + Scheduler + 微調
+#適合 接續訓練 (Resume)、突破瓶頸
+import torch
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+import os
+import numpy as np
+from sklearn.model_selection import KFold
+import threading
+import tkinter as tk
+from tkinter import messagebox
+
+from model import DLP_ResNet_Segmentation
+from dataset import CarpalTunnelDataset
+from loss import ComboLoss
+
+# --- 使用者設定 ---
+MAX_TOTAL_EPOCHS = 1000 
+EPOCHS_PER_ROUND = 10
+START_FROM_EPOCH = 350 # [設定] 接續你的進度
+BATCH_SIZE = 12 
+LR = 1e-4  # Scheduler 會自動調整，設初始值即可
+
+DATA_DIR = "./carpalTunnel"
+CHECKPOINT_DIR = "./checkpoints"
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+STOP_REQUESTED = False
+
+def save_checkpoint(state, filename):
+    torch.save(state, filename)
+
+def load_checkpoint(checkpoint, model, optimizer):
+    model.load_state_dict(checkpoint["state_dict"])
+    # [新版特徵] 不載入舊 Optimizer，讓 SGD 重頭接手
+    start_epoch = checkpoint["epoch"]
+    best_loss = checkpoint.get("best_loss", float("inf"))
+    return start_epoch, best_loss
+
+def write_stop_log(fold, epoch):
+    with open("last_stop_log.txt", "w", encoding="utf-8") as f:
+        f.write(f"Fold: {fold}\nEpoch: {epoch + 1}\n")
+
+def calculate_dice_metric(pred, target, num_classes):
+    dice_scores = []
+    pred = torch.argmax(pred, dim=1)
+    for i in range(1, num_classes):
+        p = (pred == i).float(); t = (target == i).float()
+        intersection = (p * t).sum(); union = p.sum() + t.sum()
+        score = 1.0 if union == 0 else (2. * intersection) / (union + 1e-5)
+        dice_scores.append(score.item())
+    return dice_scores
+
+def train_one_fold(fold_index, train_indices, val_indices, current_target_epoch):
+    global STOP_REQUESTED
+    train_ds = CarpalTunnelDataset(DATA_DIR, case_indices=train_indices)
+    val_ds = CarpalTunnelDataset(DATA_DIR, case_indices=val_indices)
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True)
+    val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
+    
+    model = DLP_ResNet_Segmentation(num_classes=4).to(DEVICE)
+    
+    # [新版特徵] 使用 SGD + Momentum
+    optimizer = optim.SGD(model.parameters(), lr=LR, momentum=0.9, weight_decay=1e-4)
+    
+    # [新版特徵] 加入 Scheduler
+    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2, eta_min=1e-6)
+    
+    # 權重 (救援 CT)
+    loss_weights = [0.1, 4.0, 1.0, 8.0] 
+    criterion = ComboLoss(weights=loss_weights).to(DEVICE)
+    scaler = torch.amp.GradScaler('cuda')
+
+    checkpoint_path = os.path.join(CHECKPOINT_DIR, f"checkpoint_fold_{fold_index+1}.pth")
+    best_model_path = os.path.join(CHECKPOINT_DIR, f"best_model_fold_{fold_index+1}.pth")
+    
+    start_epoch = 0
+    best_val_loss = float('inf')
+
+    if os.path.exists(checkpoint_path):
+        try:
+            checkpoint = torch.load(checkpoint_path)
+            start_epoch, best_val_loss = load_checkpoint(checkpoint, model, optimizer)
+        except: pass
+    elif os.path.exists(best_model_path):
+        try: model.load_state_dict(torch.load(best_model_path))
+        except: pass
+
+    if start_epoch >= current_target_epoch: return best_val_loss
+
+    print(f"\n>>> Fold {fold_index+1} | 目標: {current_target_epoch} (目前: {start_epoch})")
+
+    for epoch in range(start_epoch, current_target_epoch):
+        if STOP_REQUESTED:
+            write_stop_log(fold_index + 1, epoch)
+            return None 
+
+        model.train()
+        loop = tqdm(train_loader, desc=f"Fold {fold_index+1} Ep {epoch+1}", leave=False)
+        
+        for imgs, masks in loop:
+            imgs = imgs.to(DEVICE); masks = masks.to(DEVICE)
+            with torch.amp.autocast('cuda'):
+                outputs = model(imgs); loss = criterion(outputs, masks)
+            optimizer.zero_grad(); scaler.scale(loss).backward(); scaler.step(optimizer); scaler.update()
+            loop.set_postfix(loss=f"{loss.item():.4f}")
+        
+        # [新版特徵] 更新 Scheduler
+        scheduler.step(epoch)
+        curr_lr = optimizer.param_groups[0]['lr']
+
+        model.eval()
+        val_loss = 0; mn, ft, ct = [], [], []
+        with torch.no_grad():
+            for imgs, masks in val_loader:
+                imgs = imgs.to(DEVICE); masks = masks.to(DEVICE)
+                with torch.amp.autocast('cuda'):
+                    outputs = model(imgs); loss = criterion(outputs, masks)
+                val_loss += loss.item()
+                scores = calculate_dice_metric(outputs, masks, 4)
+                mn.append(scores[0]); ft.append(scores[1]); ct.append(scores[2])
+        
+        avg_val = val_loss / len(val_loader)
+        print(f"   Ep {epoch+1} [LR={curr_lr:.6f}] Loss: {avg_val:.4f} | MN: {np.mean(mn):.2f} | FT: {np.mean(ft):.2f} | CT: {np.mean(ct):.2f}")
+        
+        checkpoint = {"state_dict": model.state_dict(), "optimizer": optimizer.state_dict(), "epoch": epoch + 1, "best_loss": best_val_loss}
+        save_checkpoint(checkpoint, filename=checkpoint_path)
+        if avg_val < best_val_loss:
+            best_val_loss = avg_val; torch.save(model.state_dict(), best_model_path)
+
+    return best_val_loss
+
+def training_thread_func(root_window):
+    global STOP_REQUESTED
+    kf = KFold(n_splits=5, shuffle=False)
+    folds_data = list(kf.split(np.arange(10)))
+    print(f"🚀 開始輪替訓練 (SGD + Scheduler + Focal)！")
+    try:
+        start_target = START_FROM_EPOCH + EPOCHS_PER_ROUND
+        for target in range(start_target, MAX_TOTAL_EPOCHS + 1, EPOCHS_PER_ROUND):
+            if STOP_REQUESTED: break
+            print(f"\n====== 🔄 第 {target - EPOCHS_PER_ROUND + 1} ~ {target} 輪 ======")
+            for f_idx, (t_idx, v_idx) in enumerate(folds_data):
+                if STOP_REQUESTED: break
+                if train_one_fold(f_idx, t_idx, v_idx, target) is None: break
+        if not STOP_REQUESTED: print("\n===== 🎉 完成 =====")
+    except Exception as e: print(f"\n❌ 錯誤: {e}")
+    finally: root_window.after(100, root_window.destroy)
+
+def on_stop_click(btn):
+    global STOP_REQUESTED
+    STOP_REQUESTED = True
+    btn.config(text="停止中...", bg="orange", state="disabled")
+
+def main_gui():
+    root = tk.Tk(); root.geometry("300x150"); root.attributes("-topmost", True)
+    tk.Label(root, text="DLP 最終微調\n(SGD + Scheduler)", font=("Arial", 12)).pack(pady=20)
+    btn = tk.Button(root, text="⛔ 停止", font=("Arial", 12, "bold"), bg="#ff4d4d", fg="white", command=lambda: on_stop_click(btn))
+    btn.pack(fill="x", padx=20)
+    threading.Thread(target=training_thread_func, args=(root,), daemon=True).start()
+    root.mainloop()
+
+if __name__ == "__main__": main_gui()
