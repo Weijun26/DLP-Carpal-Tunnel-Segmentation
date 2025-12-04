@@ -177,6 +177,9 @@ GUI 介面將即時顯示：
 
 > **⚠️ 注意**：若只要執行 GUI 展示，僅下載 `final_demo_model.pth` 即可；若要重現 `create_demo_model.py` 的整合過程，則需要下載所有的 `best_model_fold_*.pth`。
 
+## 影片展示
+ 
+https://drive.google.com/file/d/1oTHzArQfBCDwykUiPO51zXy02SysnuZS/view?usp=sharing
 
 -----
 
