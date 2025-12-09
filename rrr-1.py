@@ -1,4 +1,4 @@
-# 舊版：AdamW + 固定LR + IoU評分
+# 舊版：AdamW + 固定LR + IoU評分 + [自動抓取 loss-1.py]
 # 適合 從頭訓練 (From Scratch)
 import torch
 import torch.optim as optim
@@ -10,17 +10,31 @@ from sklearn.model_selection import KFold
 import threading
 import tkinter as tk
 from tkinter import messagebox
+import importlib.util # 用於動態載入
 
 from model import DLP_ResNet_Segmentation
 from dataset import CarpalTunnelDataset
-from loss import ComboLoss
+
+# --- 動態載入 loss-1.py ---
+def load_loss_class(filename):
+    if not os.path.exists(filename):
+        raise FileNotFoundError(f"❌ 找不到 {filename}！請確認它在程式同一目錄下。")
+    spec = importlib.util.spec_from_file_location("dynamic_loss_module", filename)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.ComboLoss
+
+# 強制使用 loss-1.py
+print(f"📦 正在載入 Loss 定義檔: loss-1.py (CE + Dice)...")
+ComboLoss = load_loss_class("loss-1.py")
+# -------------------------
 
 # --- 使用者設定 ---
-MAX_TOTAL_EPOCHS = 1000 
+MAX_TOTAL_EPOCHS = 300
 EPOCHS_PER_ROUND = 10
-START_FROM_EPOCH = 0 # [設定] 通常是從 0 開始
-BATCH_SIZE = 12 
-LR = 1e-4  # 固定 LR
+START_FROM_EPOCH = 0 
+BATCH_SIZE = 12 #視 GPU 記憶體調整
+LR = 1e-4  
 
 DATA_DIR = "./carpalTunnel"
 CHECKPOINT_DIR = "./checkpoints"
@@ -33,8 +47,12 @@ def save_checkpoint(state, filename):
 
 def load_checkpoint(checkpoint, model, optimizer):
     model.load_state_dict(checkpoint["state_dict"])
-    # [舊版特徵] 載入舊 Optimizer 狀態，保持延續性
-    optimizer.load_state_dict(checkpoint["optimizer"])
+    # Optimizer 防呆載入
+    try:
+        optimizer.load_state_dict(checkpoint["optimizer"])
+    except Exception as e:
+        print(f"⚠️  Optimizer 狀態不相容 (可能是不同階段的模型)，已重置優化器。")
+    
     start_epoch = checkpoint["epoch"]
     best_loss = checkpoint.get("best_loss", float("inf"))
     return start_epoch, best_loss
@@ -44,30 +62,17 @@ def write_stop_log(fold, epoch):
         f.write(f"Fold: {fold}\nEpoch: {epoch + 1}\n")
 
 def calculate_metrics(pred, target, num_classes):
-    """
-    同時計算 Dice Score 和 IoU Score
-    """
-    dice_scores = []
-    iou_scores = []
+    dice_scores = []; iou_scores = []
     pred = torch.argmax(pred, dim=1)
-    
     for i in range(1, num_classes):
-        p = (pred == i).float()
-        t = (target == i).float()
-        
+        p = (pred == i).float(); t = (target == i).float()
         intersection = (p * t).sum()
-        total_area = p.sum() + t.sum() # |A| + |B|
-        union_area = total_area - intersection # |A| + |B| - |A n B|
+        total_area = p.sum() + t.sum()
+        union_area = total_area - intersection
         
-        # Dice: 2*Inter / (|A|+|B|)
         dice = 1.0 if total_area == 0 else (2. * intersection) / (total_area + 1e-5)
-        
-        # IoU: Inter / Union
         iou = 1.0 if union_area == 0 else (intersection) / (union_area + 1e-5)
-        
-        dice_scores.append(dice.item())
-        iou_scores.append(iou.item())
-        
+        dice_scores.append(dice.item()); iou_scores.append(iou.item())
     return dice_scores, iou_scores
 
 def train_one_fold(fold_index, train_indices, val_indices, current_target_epoch):
@@ -78,11 +83,9 @@ def train_one_fold(fold_index, train_indices, val_indices, current_target_epoch)
     val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
     
     model = DLP_ResNet_Segmentation(num_classes=4).to(DEVICE)
-    
-    # [舊版特徵] 使用 AdamW
     optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-5)
     
-    # 權重 (標準)
+    # 初始化 Loss-1
     loss_weights = [0.1, 5.0, 2.0, 5.0] 
     criterion = ComboLoss(weights=loss_weights).to(DEVICE)
     scaler = torch.amp.GradScaler('cuda')
@@ -90,14 +93,12 @@ def train_one_fold(fold_index, train_indices, val_indices, current_target_epoch)
     checkpoint_path = os.path.join(CHECKPOINT_DIR, f"checkpoint_fold_{fold_index+1}.pth")
     best_model_path = os.path.join(CHECKPOINT_DIR, f"best_model_fold_{fold_index+1}.pth")
     
-    start_epoch = 0
-    best_val_loss = float('inf')
+    start_epoch = 0; best_val_loss = float('inf')
 
     if os.path.exists(checkpoint_path):
         try:
-            checkpoint = torch.load(checkpoint_path)
-            start_epoch, best_val_loss = load_checkpoint(checkpoint, model, optimizer)
-        except: pass
+            start_epoch, best_val_loss = load_checkpoint(torch.load(checkpoint_path), model, optimizer)
+        except Exception as e: print(f"載入失敗: {e}")
     elif os.path.exists(best_model_path):
         try: model.load_state_dict(torch.load(best_model_path))
         except: pass
@@ -113,7 +114,6 @@ def train_one_fold(fold_index, train_indices, val_indices, current_target_epoch)
 
         model.train()
         loop = tqdm(train_loader, desc=f"Fold {fold_index+1} Ep {epoch+1}", leave=False)
-        
         for imgs, masks in loop:
             imgs = imgs.to(DEVICE); masks = masks.to(DEVICE)
             with torch.amp.autocast('cuda'):
@@ -132,16 +132,11 @@ def train_one_fold(fold_index, train_indices, val_indices, current_target_epoch)
                 with torch.amp.autocast('cuda'):
                     outputs = model(imgs); loss = criterion(outputs, masks)
                 val_loss += loss.item()
-                
-                # 計算 Dice 和 IoU
-                d_scores, i_scores = calculate_metrics(outputs, masks, 4)
-                
-                mn_d.append(d_scores[0]); ft_d.append(d_scores[1]); ct_d.append(d_scores[2])
-                mn_i.append(i_scores[0]); ft_i.append(i_scores[1]); ct_i.append(i_scores[2])
+                d_s, i_s = calculate_metrics(outputs, masks, 4)
+                mn_d.append(d_s[0]); ft_d.append(d_s[1]); ct_d.append(d_s[2])
+                mn_i.append(i_s[0]); ft_i.append(i_s[1]); ct_i.append(i_s[2])
         
         avg_val = val_loss / len(val_loader)
-        
-        # 顯示雙指標
         print(f"   Ep {epoch+1} Loss: {avg_val:.4f}")
         print(f"     [Dice] MN: {np.mean(mn_d):.2f} | FT: {np.mean(ft_d):.2f} | CT: {np.mean(ct_d):.2f}")
         print(f"     [IoU ] MN: {np.mean(mn_i):.2f} | FT: {np.mean(ft_i):.2f} | CT: {np.mean(ct_i):.2f}")
@@ -157,7 +152,7 @@ def training_thread_func(root_window):
     global STOP_REQUESTED
     kf = KFold(n_splits=5, shuffle=False)
     folds_data = list(kf.split(np.arange(10)))
-    print(f"🚀 開始輪替訓練 (AdamW + IoU Monitoring)！")
+    print(f"🚀 開始輪替訓練 (AdamW + IoU + Loss-1)！")
     try:
         start_target = START_FROM_EPOCH + EPOCHS_PER_ROUND
         for target in range(start_target, MAX_TOTAL_EPOCHS + 1, EPOCHS_PER_ROUND):
@@ -171,13 +166,11 @@ def training_thread_func(root_window):
     finally: root_window.after(100, root_window.destroy)
 
 def on_stop_click(btn):
-    global STOP_REQUESTED
-    STOP_REQUESTED = True
-    btn.config(text="停止中...", bg="orange", state="disabled")
+    global STOP_REQUESTED = True; btn.config(text="停止中...", bg="orange", state="disabled")
 
 def main_gui():
     root = tk.Tk(); root.geometry("300x150"); root.attributes("-topmost", True)
-    tk.Label(root, text="DLP 訓練控制器\n(Standard AdamW)", font=("Arial", 12)).pack(pady=20)
+    tk.Label(root, text="DLP 訓練控制器 (rrr-1)\n(Loss-1: CE+Dice)", font=("Arial", 12)).pack(pady=20)
     btn = tk.Button(root, text="⛔ 停止", font=("Arial", 12, "bold"), bg="#ff4d4d", fg="white", command=lambda: on_stop_click(btn))
     btn.pack(fill="x", padx=20)
     threading.Thread(target=training_thread_func, args=(root,), daemon=True).start()
