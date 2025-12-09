@@ -1,4 +1,4 @@
-# 舊版：AdamW + 固定LR + IoU評分 + [自動抓取 loss-1.py]
+# 舊版：AdamW + 固定LR + IoU評分 + [自動抓取 loss-1.py] + [語法修正]
 # 適合 從頭訓練 (From Scratch)
 import torch
 import torch.optim as optim
@@ -10,7 +10,7 @@ from sklearn.model_selection import KFold
 import threading
 import tkinter as tk
 from tkinter import messagebox
-import importlib.util # 用於動態載入
+import importlib.util 
 
 from model import DLP_ResNet_Segmentation
 from dataset import CarpalTunnelDataset
@@ -24,7 +24,6 @@ def load_loss_class(filename):
     spec.loader.exec_module(module)
     return module.ComboLoss
 
-# 強制使用 loss-1.py
 print(f"📦 正在載入 Loss 定義檔: loss-1.py (CE + Dice)...")
 ComboLoss = load_loss_class("loss-1.py")
 # -------------------------
@@ -33,7 +32,7 @@ ComboLoss = load_loss_class("loss-1.py")
 MAX_TOTAL_EPOCHS = 300
 EPOCHS_PER_ROUND = 10
 START_FROM_EPOCH = 0 
-BATCH_SIZE = 12 #視 GPU 記憶體調整
+BATCH_SIZE = 12 #視 GPU VRAM 調整
 LR = 1e-4  
 
 DATA_DIR = "./carpalTunnel"
@@ -47,11 +46,10 @@ def save_checkpoint(state, filename):
 
 def load_checkpoint(checkpoint, model, optimizer):
     model.load_state_dict(checkpoint["state_dict"])
-    # Optimizer 防呆載入
     try:
         optimizer.load_state_dict(checkpoint["optimizer"])
     except Exception as e:
-        print(f"⚠️  Optimizer 狀態不相容 (可能是不同階段的模型)，已重置優化器。")
+        print(f"⚠️  Optimizer 狀態不相容，已重置優化器。")
     
     start_epoch = checkpoint["epoch"]
     best_loss = checkpoint.get("best_loss", float("inf"))
@@ -85,7 +83,6 @@ def train_one_fold(fold_index, train_indices, val_indices, current_target_epoch)
     model = DLP_ResNet_Segmentation(num_classes=4).to(DEVICE)
     optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-5)
     
-    # 初始化 Loss-1
     loss_weights = [0.1, 5.0, 2.0, 5.0] 
     criterion = ComboLoss(weights=loss_weights).to(DEVICE)
     scaler = torch.amp.GradScaler('cuda')
@@ -166,7 +163,9 @@ def training_thread_func(root_window):
     finally: root_window.after(100, root_window.destroy)
 
 def on_stop_click(btn):
-    global STOP_REQUESTED = True; btn.config(text="停止中...", bg="orange", state="disabled")
+    global STOP_REQUESTED
+    STOP_REQUESTED = True
+    btn.config(text="停止中...", bg="orange", state="disabled")
 
 def main_gui():
     root = tk.Tk(); root.geometry("300x150"); root.attributes("-topmost", True)

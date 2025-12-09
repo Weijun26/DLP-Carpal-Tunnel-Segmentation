@@ -1,4 +1,4 @@
-# 新版：SGD + Scheduler + 微調 + IoU評分 + [自動抓取 loss-2.py]
+# 新版：SGD + Scheduler + 微調 + IoU評分 + [自動抓取 loss-2.py] + [語法修正]
 # 適合 接續訓練 (Resume)、突破瓶頸
 import torch
 import torch.optim as optim
@@ -10,7 +10,7 @@ from sklearn.model_selection import KFold
 import threading
 import tkinter as tk
 from tkinter import messagebox
-import importlib.util # 用於動態載入
+import importlib.util 
 
 from model import DLP_ResNet_Segmentation
 from dataset import CarpalTunnelDataset
@@ -24,16 +24,15 @@ def load_loss_class(filename):
     spec.loader.exec_module(module)
     return module.ComboLoss
 
-# 強制使用 loss-2.py
 print(f"📦 正在載入 Loss 定義檔: loss-2.py (Focal + Dice)...")
 ComboLoss = load_loss_class("loss-2.py")
 # -------------------------
 
 # --- 使用者設定 ---
-MAX_TOTAL_EPOCHS = 500
+MAX_TOTAL_EPOCHS = 500 
 EPOCHS_PER_ROUND = 10
-START_FROM_EPOCH = 300 # [設定] 接續進度
-BATCH_SIZE = 12 # 可視 GPU 記憶體調整
+START_FROM_EPOCH = 300
+BATCH_SIZE = 12 #視 GPU VRAM 調整
 LR = 1e-4  
 
 DATA_DIR = "./carpalTunnel"
@@ -47,7 +46,7 @@ def save_checkpoint(state, filename):
 
 def load_checkpoint(checkpoint, model, optimizer):
     model.load_state_dict(checkpoint["state_dict"])
-    # 微調模式：通常不載入舊的 AdamW 狀態，直接用新的 SGD 開始
+    # 微調模式：通常不載入舊的 Optimizer 狀態，直接用新的 SGD 開始
     start_epoch = checkpoint["epoch"]
     best_loss = checkpoint.get("best_loss", float("inf"))
     return start_epoch, best_loss
@@ -167,7 +166,9 @@ def training_thread_func(root_window):
     finally: root_window.after(100, root_window.destroy)
 
 def on_stop_click(btn):
-    global STOP_REQUESTED = True; btn.config(text="停止中...", bg="orange", state="disabled")
+    global STOP_REQUESTED
+    STOP_REQUESTED = True
+    btn.config(text="停止中...", bg="orange", state="disabled")
 
 def main_gui():
     root = tk.Tk(); root.geometry("300x150"); root.attributes("-topmost", True)
