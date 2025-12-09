@@ -140,16 +140,24 @@ python gui.py
 
 -----
 
-## 📊 評估指標 (Evaluation)
+## 📊 評估指標 (Evaluation Metrics)
 
-評估標準採用 **Dice Coefficient (DC)**：
-$$DC = \frac{2 |A \cap B|}{|A| + |B|}$$
-[cite_start]其中 A 為 Ground Truth，B 為預測結果 [cite: 56]。
+本專案採用醫學影像分割中常用的兩大指標來評估模型效能：**Dice Coefficient (Dice)** 與 **Intersection over Union (IoU)**。
 
-GUI 介面將即時顯示：
+### 1. Dice Coefficient (DC)
+Dice 係數是一種集合相似度度量函數，通常用於計算兩個樣本的相似度（值域為 0~1）。
+$$Dice = \frac{2 |A \cap B|}{|A| + |B|}$$
 
-1.  **Sequence DC (Mean)**：該病例所有切片的平均分數。
-2.  **Current Slice DC**：當前檢視切片的分數。
+### 2. Intersection over Union (IoU)
+IoU 又稱為 Jaccard Index，計算的是「預測區域」與「真實區域」交集與聯集的比例（值域為 0~1）。
+$$IoU = \frac{|A \cap B|}{|A \cup B|} = \frac{|A \cap B|}{|A| + |B| - |A \cap B|}$$
+
+> 其中 $A$ 為 Ground Truth (真實標註)，$B$ 為 Prediction (預測結果)。
+
+### 💻 GUI 介面顯示
+程式介面將即時計算並顯示以下資訊：
+* **Sequence Mean (Dice / IoU)**：該病例所有 MRI 切片的平均分數，用於評估整體 3D 分割效果。
+* **Current Slice (Dice / IoU)**：當前檢視切片的即時分數，用於細部檢視模型在特定解剖結構上的表現。
 
 -----
 ## 📥 模型權重下載 (Download Pre-trained Models)
