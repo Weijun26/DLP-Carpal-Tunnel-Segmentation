@@ -1,5 +1,5 @@
-#新版：SGD + Scheduler + 微調
-#適合 接續訓練 (Resume)、突破瓶頸
+# 新版：SGD + Scheduler + 微調 + IoU評分
+# 適合 接續訓練 (Resume)、突破瓶頸
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
@@ -18,7 +18,7 @@ from loss import ComboLoss
 # --- 使用者設定 ---
 MAX_TOTAL_EPOCHS = 1000 
 EPOCHS_PER_ROUND = 10
-START_FROM_EPOCH = 350 # [設定] 接續你的進度
+START_FROM_EPOCH = 300 # [設定] 接續你的進度
 BATCH_SIZE = 12 
 LR = 1e-4  # Scheduler 會自動調整，設初始值即可
 
@@ -42,15 +42,32 @@ def write_stop_log(fold, epoch):
     with open("last_stop_log.txt", "w", encoding="utf-8") as f:
         f.write(f"Fold: {fold}\nEpoch: {epoch + 1}\n")
 
-def calculate_dice_metric(pred, target, num_classes):
+def calculate_metrics(pred, target, num_classes):
+    """
+    同時計算 Dice Score 和 IoU Score
+    """
     dice_scores = []
+    iou_scores = []
     pred = torch.argmax(pred, dim=1)
+    
     for i in range(1, num_classes):
-        p = (pred == i).float(); t = (target == i).float()
-        intersection = (p * t).sum(); union = p.sum() + t.sum()
-        score = 1.0 if union == 0 else (2. * intersection) / (union + 1e-5)
-        dice_scores.append(score.item())
-    return dice_scores
+        p = (pred == i).float()
+        t = (target == i).float()
+        
+        intersection = (p * t).sum()
+        total_area = p.sum() + t.sum() # |A| + |B|
+        union_area = total_area - intersection # |A| + |B| - |A n B|
+        
+        # Dice: 2*Inter / (|A|+|B|)
+        dice = 1.0 if total_area == 0 else (2. * intersection) / (total_area + 1e-5)
+        
+        # IoU: Inter / Union
+        iou = 1.0 if union_area == 0 else (intersection) / (union_area + 1e-5)
+        
+        dice_scores.append(dice.item())
+        iou_scores.append(iou.item())
+        
+    return dice_scores, iou_scores
 
 def train_one_fold(fold_index, train_indices, val_indices, current_target_epoch):
     global STOP_REQUESTED
@@ -111,18 +128,29 @@ def train_one_fold(fold_index, train_indices, val_indices, current_target_epoch)
         curr_lr = optimizer.param_groups[0]['lr']
 
         model.eval()
-        val_loss = 0; mn, ft, ct = [], [], []
+        val_loss = 0
+        mn_d, ft_d, ct_d = [], [], []
+        mn_i, ft_i, ct_i = [], [], []
+        
         with torch.no_grad():
             for imgs, masks in val_loader:
                 imgs = imgs.to(DEVICE); masks = masks.to(DEVICE)
                 with torch.amp.autocast('cuda'):
                     outputs = model(imgs); loss = criterion(outputs, masks)
                 val_loss += loss.item()
-                scores = calculate_dice_metric(outputs, masks, 4)
-                mn.append(scores[0]); ft.append(scores[1]); ct.append(scores[2])
+                
+                # 計算 Dice 和 IoU
+                d_scores, i_scores = calculate_metrics(outputs, masks, 4)
+                
+                mn_d.append(d_scores[0]); ft_d.append(d_scores[1]); ct_d.append(d_scores[2])
+                mn_i.append(i_scores[0]); ft_i.append(i_scores[1]); ct_i.append(i_scores[2])
         
         avg_val = val_loss / len(val_loader)
-        print(f"   Ep {epoch+1} [LR={curr_lr:.6f}] Loss: {avg_val:.4f} | MN: {np.mean(mn):.2f} | FT: {np.mean(ft):.2f} | CT: {np.mean(ct):.2f}")
+        
+        # 顯示雙指標 + LR
+        print(f"   Ep {epoch+1} [LR={curr_lr:.6f}] Loss: {avg_val:.4f}")
+        print(f"     [Dice] MN: {np.mean(mn_d):.2f} | FT: {np.mean(ft_d):.2f} | CT: {np.mean(ct_d):.2f}")
+        print(f"     [IoU ] MN: {np.mean(mn_i):.2f} | FT: {np.mean(ft_i):.2f} | CT: {np.mean(ct_i):.2f}")
         
         checkpoint = {"state_dict": model.state_dict(), "optimizer": optimizer.state_dict(), "epoch": epoch + 1, "best_loss": best_val_loss}
         save_checkpoint(checkpoint, filename=checkpoint_path)
@@ -135,7 +163,7 @@ def training_thread_func(root_window):
     global STOP_REQUESTED
     kf = KFold(n_splits=5, shuffle=False)
     folds_data = list(kf.split(np.arange(10)))
-    print(f"🚀 開始輪替訓練 (SGD + Scheduler + Focal)！")
+    print(f"🚀 開始輪替訓練 (SGD + Scheduler + IoU Monitoring)！")
     try:
         start_target = START_FROM_EPOCH + EPOCHS_PER_ROUND
         for target in range(start_target, MAX_TOTAL_EPOCHS + 1, EPOCHS_PER_ROUND):
