@@ -133,10 +133,21 @@ class CarpalTunnelDemoApp:
         path = filedialog.askdirectory(title="選擇 carpalTunnel 資料夾")
         if path:
             self.data_dir = path
-            self.cases = sorted([d for d in os.listdir(path) if d.isdigit() and os.path.isdir(os.path.join(path, d))], key=int)
+            
+            # --- 修改開始 (開始支援 testData) ---
+            # 取得該路徑下所有的資料夾
+            all_dirs = [d for d in os.listdir(path) if os.path.isdir(os.path.join(path, d))]
+            
+            # 分開處理：純數字資料夾 (用數字排序) 和 其他資料夾 (如 testData)
+            numeric_cases = sorted([d for d in all_dirs if d.isdigit()], key=int)
+            special_cases = sorted([d for d in all_dirs if not d.isdigit()]) 
+            
+            # 合併列表：數字在前，testData 在後
+            self.cases = numeric_cases + special_cases
+            # --- 修改結束 ---
             
             if not self.cases:
-                messagebox.showwarning("警告", "選擇的資料夾中沒有發現數字編號的病例資料夾 (如 0, 1, 2...)")
+                messagebox.showwarning("警告", "選擇的資料夾中沒有發現任何資料夾")
                 return
 
             self.case_combo['values'] = self.cases
